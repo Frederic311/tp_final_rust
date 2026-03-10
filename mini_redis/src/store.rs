@@ -19,14 +19,6 @@ impl Entry {
         }
     }
 
-    /// Crée une nouvelle entrée avec expiration
-    pub fn with_expiration(value: String, expires_at: Instant) -> Self {
-        Entry {
-            value,
-            expires_at: Some(expires_at),
-        }
-    }
-
     /// Vérifie si l'entrée a expiré
     pub fn is_expired(&self) -> bool {
         if let Some(expires_at) = self.expires_at {

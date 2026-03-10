@@ -1,6 +1,14 @@
+mod advanced;
+mod basic;
+mod expiration;
+
 use crate::protocol::{Request, Response};
-use crate::store::{Entry, Store};
-use std::time::{Duration, Instant};
+use crate::store::Store;
+
+// Ré-exporter les fonctions publiques
+pub use advanced::{handle_decr, handle_incr, handle_save};
+pub use basic::{handle_del, handle_get, handle_ping, handle_set};
+pub use expiration::{handle_expire, handle_keys, handle_ttl};
 
 /// Traite une requête et retourne la réponse appropriée
 pub async fn process_request(request: Request, store: &Store) -> Response {
@@ -14,128 +22,10 @@ pub async fn process_request(request: Request, store: &Store) -> Response {
         "KEYS" => handle_keys(store).await,
         "EXPIRE" => handle_expire(request, store).await,
         "TTL" => handle_ttl(request, store).await,
+        "INCR" => handle_incr(request, store).await,
+        "DECR" => handle_decr(request, store).await,
+        "SAVE" => handle_save(store).await,
         _ => Response::error("unknown command"),
-    }
-}
-
-/// PING - Test de connexion
-fn handle_ping() -> Response {
-    Response::ok()
-}
-
-/// SET - Stocke une paire clé/valeur
-async fn handle_set(request: Request, store: &Store) -> Response {
-    let key = match request.key {
-        Some(k) => k,
-        None => return Response::error("missing key"),
-    };
-    let value = match request.value {
-        Some(v) => v,
-        None => return Response::error("missing value"),
-    };
-
-    let mut store = store.lock().await;
-    store.insert(key, Entry::new(value));
-    Response::ok()
-}
-
-/// GET - Récupère la valeur associée à une clé
-async fn handle_get(request: Request, store: &Store) -> Response {
-    let key = match request.key {
-        Some(k) => k,
-        None => return Response::error("missing key"),
-    };
-
-    let store = store.lock().await;
-    let value = store.get(&key).and_then(|entry| {
-        if entry.is_expired() {
-            None
-        } else {
-            Some(entry.value.clone())
-        }
-    });
-    Response::ok_with_value(value)
-}
-
-/// DEL - Supprime une clé
-async fn handle_del(request: Request, store: &Store) -> Response {
-    let key = match request.key {
-        Some(k) => k,
-        None => return Response::error("missing key"),
-    };
-
-    let mut store = store.lock().await;
-    let count = if store.remove(&key).is_some() { 1 } else { 0 };
-    Response::ok_with_count(count)
-}
-
-/// KEYS - Liste toutes les clés (non expirées)
-async fn handle_keys(store: &Store) -> Response {
-    let store = store.lock().await;
-    let keys: Vec<String> = store
-        .iter()
-        .filter(|(_, entry)| !entry.is_expired())
-        .map(|(key, _)| key.clone())
-        .collect();
-    Response::ok_with_keys(keys)
-}
-
-/// EXPIRE - Définit une expiration sur une clé
-async fn handle_expire(request: Request, store: &Store) -> Response {
-    let key = match request.key {
-        Some(k) => k,
-        None => return Response::error("missing key"),
-    };
-    let seconds = match request.seconds {
-        Some(s) => s,
-        None => return Response::error("missing seconds"),
-    };
-
-    let mut store = store.lock().await;
-    if let Some(entry) = store.get_mut(&key) {
-        if !entry.is_expired() {
-            let expires_at = Instant::now() + Duration::from_secs(seconds);
-            entry.expires_at = Some(expires_at);
-            Response::ok()
-        } else {
-            Response::error("key not found")
-        }
-    } else {
-        Response::error("key not found")
-    }
-}
-
-/// TTL - Retourne le temps restant avant expiration
-async fn handle_ttl(request: Request, store: &Store) -> Response {
-    let key = match request.key {
-        Some(k) => k,
-        None => return Response::error("missing key"),
-    };
-
-    let store = store.lock().await;
-    match store.get(&key) {
-        Some(entry) => {
-            if entry.is_expired() {
-                // Clé expirée = considérée comme inexistante
-                Response::ok_with_ttl(-2)
-            } else if let Some(expires_at) = entry.expires_at {
-                // Clé avec expiration : calculer le temps restant
-                let now = Instant::now();
-                if expires_at > now {
-                    let remaining = expires_at.duration_since(now);
-                    Response::ok_with_ttl(remaining.as_secs() as i64)
-                } else {
-                    Response::ok_with_ttl(-2)
-                }
-            } else {
-                // Clé sans expiration
-                Response::ok_with_ttl(-1)
-            }
-        }
-        None => {
-            // Clé inexistante
-            Response::ok_with_ttl(-2)
-        }
     }
 }
 
@@ -396,7 +286,114 @@ mod tests {
         let response = process_request(request, &store).await;
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"ttl\":"));
-        // Vérifier que c'est un nombre positif (difficile d'être précis avec le timing)
+        // Vérifier que c'est un nombre positif
         assert!(!json.contains("\"ttl\":-"));
+    }
+
+    #[tokio::test]
+    async fn test_incr() {
+        let store = new_store();
+
+        // INCR sur clé inexistante → crée avec valeur 1
+        let request = Request {
+            cmd: "INCR".to_string(),
+            key: Some("counter".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"value\":1"));
+
+        // INCR sur clé existante → incrémente
+        let request = Request {
+            cmd: "INCR".to_string(),
+            key: Some("counter".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"value\":2"));
+
+        // SET une valeur non-entière puis INCR → erreur
+        let request = Request {
+            cmd: "SET".to_string(),
+            key: Some("notint".to_string()),
+            value: Some("hello".to_string()),
+            seconds: None,
+        };
+        process_request(request, &store).await;
+
+        let request = Request {
+            cmd: "INCR".to_string(),
+            key: Some("notint".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"status\":\"error\""));
+        assert!(json.contains("not an integer"));
+    }
+
+    #[tokio::test]
+    async fn test_decr() {
+        let store = new_store();
+
+        // DECR sur clé inexistante → crée avec valeur -1
+        let request = Request {
+            cmd: "DECR".to_string(),
+            key: Some("counter".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"value\":-1"));
+
+        // DECR sur clé existante → décrémente
+        let request = Request {
+            cmd: "DECR".to_string(),
+            key: Some("counter".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"value\":-2"));
+    }
+
+    #[tokio::test]
+    async fn test_save() {
+        let store = new_store();
+
+        // Ajouter des données
+        let request = Request {
+            cmd: "SET".to_string(),
+            key: Some("key1".to_string()),
+            value: Some("value1".to_string()),
+            seconds: None,
+        };
+        process_request(request, &store).await;
+
+        let request = Request {
+            cmd: "SET".to_string(),
+            key: Some("key2".to_string()),
+            value: Some("value2".to_string()),
+            seconds: None,
+        };
+        process_request(request, &store).await;
+
+        // SAVE
+        let request = Request {
+            cmd: "SAVE".to_string(),
+            key: None,
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"status\":\"ok\""));
     }
 }

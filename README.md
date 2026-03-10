@@ -2,6 +2,8 @@
 
 **Durée : 3h30** | Rust asynchrone | Serveur TCP/JSON
 
+**ONANA FREDERIC**
+**F2**
 ---
 
 ## Objectif
