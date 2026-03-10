@@ -4,6 +4,7 @@ mod protocol;
 mod store;
 
 use tokio::net::TcpListener;
+use tokio::time::{interval, Duration};
 use tracing::{error, info};
 
 #[tokio::main]
@@ -30,6 +31,16 @@ async fn main() {
     };
 
     info!("MiniRedis server listening on {}", addr);
+
+    // Lancer la tâche de nettoyage des clés expirées
+    let cleanup_store = store.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            commands::cleanup_expired_keys(&cleanup_store).await;
+        }
+    });
 
     // Accept loop : accepter les connexions et spawner une tâche par client
     loop {
