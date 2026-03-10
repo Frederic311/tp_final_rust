@@ -1,3 +1,11 @@
+mod commands;
+mod handler;
+mod protocol;
+mod store;
+
+use tokio::net::TcpListener;
+use tracing::{error, info};
+
 #[tokio::main]
 async fn main() {
     // Initialiser tracing
@@ -8,14 +16,37 @@ async fn main() {
         )
         .init();
 
-    // TODO: Implémenter le serveur MiniRedis sur 127.0.0.1:7878
-    //
-    // Étapes suggérées :
-    // 1. Créer le store partagé (Arc<Mutex<HashMap<String, ...>>>)
-    // 2. Bind un TcpListener sur 127.0.0.1:7878
-    // 3. Accept loop : pour chaque connexion, spawn une tâche
-    // 4. Dans chaque tâche : lire les requêtes JSON ligne par ligne,
-    //    traiter la commande, envoyer la réponse JSON + '\n'
+    // Créer le store partagé
+    let store = store::new_store();
 
-    println!("MiniRedis - à implémenter !");
+    // Bind le listener sur le port 7878
+    let addr = "127.0.0.1:7878";
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!("Failed to bind to {}: {}", addr, e);
+            return;
+        }
+    };
+
+    info!("MiniRedis server listening on {}", addr);
+
+    // Accept loop : accepter les connexions et spawner une tâche par client
+    loop {
+        match listener.accept().await {
+            Ok((socket, addr)) => {
+                info!("New client connected: {}", addr);
+                let store = store.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handler::handle_client(socket, store).await {
+                        error!("Error handling client {}: {}", addr, e);
+                    }
+                    info!("Client disconnected: {}", addr);
+                });
+            }
+            Err(e) => {
+                error!("Failed to accept connection: {}", e);
+            }
+        }
+    }
 }
