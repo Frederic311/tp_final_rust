@@ -13,6 +13,7 @@ pub async fn process_request(request: Request, store: &Store) -> Response {
         "DEL" => handle_del(request, store).await,
         "KEYS" => handle_keys(store).await,
         "EXPIRE" => handle_expire(request, store).await,
+        "TTL" => handle_ttl(request, store).await,
         _ => Response::error("unknown command"),
     }
 }
@@ -101,6 +102,40 @@ async fn handle_expire(request: Request, store: &Store) -> Response {
         }
     } else {
         Response::error("key not found")
+    }
+}
+
+/// TTL - Retourne le temps restant avant expiration
+async fn handle_ttl(request: Request, store: &Store) -> Response {
+    let key = match request.key {
+        Some(k) => k,
+        None => return Response::error("missing key"),
+    };
+
+    let store = store.lock().await;
+    match store.get(&key) {
+        Some(entry) => {
+            if entry.is_expired() {
+                // Clé expirée = considérée comme inexistante
+                Response::ok_with_ttl(-2)
+            } else if let Some(expires_at) = entry.expires_at {
+                // Clé avec expiration : calculer le temps restant
+                let now = Instant::now();
+                if expires_at > now {
+                    let remaining = expires_at.duration_since(now);
+                    Response::ok_with_ttl(remaining.as_secs() as i64)
+                } else {
+                    Response::ok_with_ttl(-2)
+                }
+            } else {
+                // Clé sans expiration
+                Response::ok_with_ttl(-1)
+            }
+        }
+        None => {
+            // Clé inexistante
+            Response::ok_with_ttl(-2)
+        }
     }
 }
 
@@ -297,5 +332,71 @@ mod tests {
         let response = process_request(request, &store).await;
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"value\":null"));
+    }
+
+    #[tokio::test]
+    async fn test_ttl() {
+        let store = new_store();
+
+        // TTL sur clé inexistante → -2
+        let request = Request {
+            cmd: "TTL".to_string(),
+            key: Some("nonexistent".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"ttl\":-2"));
+
+        // Créer une clé sans expiration
+        let request = Request {
+            cmd: "SET".to_string(),
+            key: Some("permanent".to_string()),
+            value: Some("value".to_string()),
+            seconds: None,
+        };
+        process_request(request, &store).await;
+
+        // TTL sur clé sans expiration → -1
+        let request = Request {
+            cmd: "TTL".to_string(),
+            key: Some("permanent".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"ttl\":-1"));
+
+        // Créer une clé avec expiration de 10 secondes
+        let request = Request {
+            cmd: "SET".to_string(),
+            key: Some("expiring".to_string()),
+            value: Some("value".to_string()),
+            seconds: None,
+        };
+        process_request(request, &store).await;
+
+        let request = Request {
+            cmd: "EXPIRE".to_string(),
+            key: Some("expiring".to_string()),
+            value: None,
+            seconds: Some(10),
+        };
+        process_request(request, &store).await;
+
+        // TTL doit être entre 8 et 10 secondes
+        let request = Request {
+            cmd: "TTL".to_string(),
+            key: Some("expiring".to_string()),
+            value: None,
+            seconds: None,
+        };
+        let response = process_request(request, &store).await;
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"ttl\":"));
+        // Vérifier que c'est un nombre positif (difficile d'être précis avec le timing)
+        assert!(!json.contains("\"ttl\":-"));
     }
 }
